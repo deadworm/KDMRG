@@ -1,13 +1,13 @@
-#For initial mps
-function initial_mps(l, n, phySpace, bond_dim)
+#For initial random mps
+function rnd_mps(l, n, bond_dim)
     bond_list = []
-    push!(bond_list, Vect[FermionParity⊠U1Irrep]((0, 0) => 1))
+    push!(bond_list, zb)
     for i = 1:(l-1)
         push!(bond_list, fuse(bond_list[end], phySpace))
     end
-    push!(bond_list, Vect[FermionParity⊠U1Irrep]((0, n) => 1))
+    push!(bond_list, nb)
 
-    m = FiniteMPS([randn(Float64, bond_list[i] ⊗ phySpace ← bond_list[i+1]) for i in 1:l])
+    m = FiniteMPS([randn(ComplexF64, bond_list[i] ⊗ phySpace ← bond_list[i+1]) for i in 1:l])
     @show [dim(space(m[i], 3)) for i in 1:l]
 
     m = changebonds(m, SvdCut(trscheme=truncdim(bond_dim)))
@@ -16,20 +16,25 @@ function initial_mps(l, n, phySpace, bond_dim)
     return m
 end
 
-#For the configuration coefficient of mps
-function get_config(m, config)
+#For initial direct-product mps
+function prod_mps(config)
     bond_list = []
-    push!(bond_list, Vect[FermionParity⊠U1Irrep]((0, 0) => 1))
+    push!(bond_list, zb)
     for i = 1:l
-        push!(bond_list, fuse(bond_list[end], Vect[FermionParity⊠U1Irrep]((config[i], config[i]) => 1)))
+        push!(bond_list, fuse(bond_list[end], Vect[FermionParity ⊠ U1Irrep]((config[i], config[i]) => 1)))
     end
-    mp = FiniteMPS([ones(Float64, bond_list[i] ⊗ phySpace ← bond_list[i+1]) for i in 1:l])
-    cm = MPSKit.dot(mp, m)
+    mf = FiniteMPS([ones(Float64, bond_list[i] ⊗ phySpace ← bond_list[i+1]) for i in 1:l])
+    return mf
+end
 
+#For the configuration coefficient of mps
+function get_coef(m, config)
+    mf = prod_mps(config)
+    cm = MPSKit.dot(mf, m)
     return cm
 end
 
-#For computing observables
+#For computing observables [coefficient, site1, site2, ...] for each term
 function observable_config(ostring, m, cm, config)
     oterms=size(ostring, 1)
     olength=size(ostring, 2)
@@ -55,10 +60,10 @@ function observable_config(ostring, m, cm, config)
             end
         end
         if oc[it]!=0
-            osum+=oc[it]*get_config(m, nconfig)
+            osum+=oc[it] * get_coef(m, nconfig)
         end
     end
-    olocal=osum/cm
+    olocal=osum / cm
 
     return olocal
 end

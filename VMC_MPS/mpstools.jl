@@ -35,10 +35,10 @@ function prod_mps(config)
     B[1] = zb
     tensors = Vector{TensorMap}(undef, l)
     for i = 1:l
-        pindex=config[2*i]*2+config[2*i-1]  #(1,0)=>1,(0,1)=>2
-        B[i+1] = fuse(B[i], phylist[pindex+1])
+        pindex=s2p[(config[2*i-1],config[2*i])]
+        B[i+1] = fuse(B[i], phylist[pindex])
         tenow = zeros(Float64, B[i] ⊗ phySpace ← B[i+1])
-        if pindex == 2
+        if pindex == 3
             tenow.data[2] = 1.0
         else
             tenow.data[1] = 1.0
@@ -95,33 +95,34 @@ function observable_config(ostring, m, cm, config, Dall)
 end
 
 #For mps gradient-normalize update
-function gn_update(m, em, gm, Dm, dm)
+function gn_update(m, wm, em, gm, Dm, dm)
     nm=Vector{TensorMap}(undef, l)
+    configs=collect(keys(Dm))
     for il=1:l
         nm[il] = copy(m[il])
     end
-    for cf in keys(Dm)
+    for cf in configs
         (cn, _, enm, gradm) = Dm[cf]
         for il=1:l
-            δm = cn * (gradm[il]-gm[il]) * (enm-em) / mcsample
+            δm = cn * (gradm[il]-gm[il]) * (enm-em) / wm
             nm[il] = nm[il] - dm * δm
         end
     end
     δm_norm=0
     for il=1:l
-        δm_norm+=norm(real(nm[il]-m[il]))
+        δm_norm+=norm(nm[il]-m[il])
     end
     @show δm_norm
     return FiniteMPS([nm[il] for il in 1:l])
 end
 
 #For mps stochastic-reconfiguration update
-function sr_update(m, em, gm, Dm, dt)
+function sr_update(m, wm, em, gm, Dm, dt)
     lk=length(Dm)
+    configs=collect(keys(Dm))
     cflist=zeros(ComplexF64, lk, lk)
-    enlist = [Dm[cf][3]-em for cf in keys(Dm)]
-    # glist = [Dm[cf][4]-gm for cf in keys(Dm)]
-    glist = [Dm[cf][4] for cf in keys(Dm)]
+    enlist = [sqrt(Dm[cf][1]/wm) * (Dm[cf][3]-em) for cf in configs]
+    glist = [sqrt(Dm[cf][1]/wm) * (Dm[cf][4]-gm) for cf in configs]
     for i1=1:lk
         for i2=1:i1
             cft=0
@@ -141,7 +142,8 @@ function sr_update(m, em, gm, Dm, dt)
             end
         end
     end
-    ylist = cg(Hermitian(cflist), enlist)
+    ylist, cglog = cg(Hermitian(cflist+1e-4*sum(diag(cflist))/lk*I), enlist; reltol=1e-5, maxiter=5lk, log=true)
+    @show cglog
     nm=Vector{TensorMap}(undef, l)
     for il=1:l
         nm[il] = copy(m[il])
@@ -152,7 +154,7 @@ function sr_update(m, em, gm, Dm, dt)
             ∂m = glist[ik][il] * ylist[ik]
             nm[il] = nm[il] - dt * ∂m
         end
-        ∂m_norm+=norm(real(nm[il]-m[il]))
+        ∂m_norm+=norm(nm[il]-m[il])
     end
     @show ∂m_norm
     return FiniteMPS([nm[il] for il in 1:l])

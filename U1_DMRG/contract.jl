@@ -34,14 +34,14 @@ end
 
 #For compute lt and rt
 function ltrt!(lt, rt, mps, mpo, l)
-    onelt = TensorMap(ones, space(mps[1],1)', space(mps[1],1)' ⊗ space(mpo[1],1))
+    onelt = ones(ComplexF64, space(mps[1],1)', space(mps[1],1)' ⊗ space(mpo[1],1))
     lt[1] = onelt
     for il = 2:l+1
-        lt[il] = cmpsleft(lt[il-1], mps[il-1], mpo[il-1], permute(mps[il-1]', (3,), (1, 2)))
+        lt[il] = cmpsleft(lt[il-1], mps[il-1], mpo[il-1], permute(mps[il-1]', ((3,), (1, 2))))
     end
-    onert = TensorMap(ones, space(mps[l],3)', space(mps[l],3)' ⊗ space(mpo[l],4))
+    onert = ones(ComplexF64, space(mps[l],3)', space(mps[l],3)' ⊗ space(mpo[l],4))
     rt[l+1] = onert
     for il = l:-1:1
-        rt[il] = cmpsright(rt[il+1], mps[il], mpo[il], permute(mps[il]', (3,), (1, 2)))
+        rt[il] = cmpsright(rt[il+1], mps[il], mpo[il], permute(mps[il]', ((3,), (1, 2))))
     end
 end

@@ -6,7 +6,7 @@ function MPSfg(l, config_nfsz, phySpace)
         Vr = flow_qn
         flow_qn = fuse(flow_qn, config_nfsz[i])
         Vl = flow_qn
-        MPS[i] = TensorMap(ones, Float64, Vl ← phySpace ⊗ Vr)
+        MPS[i] = ones(Float64, Vl ← phySpace ⊗ Vr)
     end
     #   MPS diagram:
     #  ← o1 ← o2 ← ... ← ol ←
@@ -32,10 +32,10 @@ end
 #  ...  ← oi ← oi ← ... ← ol ←
 #  ...    ↑    ↑    ...   ↑
 function rnMPS!(mps, L, i)
-    l, q = rightorth(mps[L], (1,), (2, 3))
+    l, q = right_orth(permute(mps[L], ((1,), (2, 3))))
     mps[L] = q
     for il = (L-1):-1:i
-        l, q = rightorth(permute(mps[il], (1, 2), (3,)) * l, (1,), (2, 3))
+        l, q = right_orth(permute(permute(mps[il], ((1, 2), (3,))) * l, ((1,), (2, 3))))
         mps[il] = q
     end
 end

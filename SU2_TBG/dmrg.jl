@@ -1,4 +1,5 @@
 #dmrg test for Heisenberg model
+using Pkg; Pkg.activate(".")
 using TensorKit
 using KrylovKit
 using Random
@@ -39,7 +40,6 @@ using Plots
     #generate mpo
     mpolist = []
     for inh in eachindex(hlist)
-        # inh = 1
         os = []
         tsla = hlist[inh][1]
         for ik1 = 1:Nk
@@ -158,10 +158,10 @@ using Plots
             for il = 1:l-1    #sweep from 1 to l-1
                 @tensor mps2[b1 p1 p2 b2] := mps[il][b1; p1 b0] * mps[il+1][b0; p2 b2]
                 e1, v1 = eigsolve([ltlist[:, il], mpo2list[:, il], rtlist[:, il+2]], mps2, 1, :SR; ishermitian=true, tol=1e-14, krylovdim=10, maxiter=1)
-                mps[il], S, V, ϵ = tsvd(v1[1], (1, 2), (3, 4); trunc=truncdim(bondd), alg=TensorKit.SVD())
+                mps[il], S, V, ϵ = svd_trunc(permute(v1[1], ((1, 2), (3, 4))); trunc=truncrank(bondd))
                 mps[il+1] = S * V
                 for im in eachindex(mpolist)
-                    ltlist[im, il+1] = cmpsleft(ltlist[im, il], mps[il], mpolist[im][il], permute(mps[il]', (2,), (3, 1)))
+                    ltlist[im, il+1] = cmpsleft(ltlist[im, il], mps[il], mpolist[im][il], permute(mps[il]', ((2,), (3, 1))))
                 end
                 println("Sweep $(is) Sites $(il) $(il+1): Energy $(e1[1]), trunc $(ϵ) D $(dim(domain(mps[il])))")
 
@@ -177,10 +177,10 @@ using Plots
             for il = l:-1:2     #sweep from l to 2
                 @tensor mps2[b1 p1 p2 b2] := mps[il-1][b1; p1 b0] * mps[il][b0; p2 b2]
                 e1, v1 = eigsolve([ltlist[:, il-1], mpo2list[:, il-1], rtlist[:, il+1]], mps2, 1, :SR; ishermitian=true, tol=1e-14, krylovdim=10, maxiter=1)
-                U, S, mps[il], ϵ = tsvd(v1[1], (1, 2), (3, 4); trunc=truncdim(bondd), alg=TensorKit.SVD())
+                U, S, mps[il], ϵ = svd_trunc(permute(v1[1], ((1, 2), (3, 4))); trunc=truncrank(bondd))
                 mps[il-1] = U * S
                 for im in eachindex(mpolist)
-                    rtlist[im, il] = cmpsright(rtlist[im, il+1], mps[il], mpolist[im][il], permute(mps[il]', (3,), (1, 2)))
+                    rtlist[im, il] = cmpsright(rtlist[im, il+1], mps[il], mpolist[im][il], permute(mps[il]', ((3,), (1, 2))))
                 end
                 println("Sweep $(is) Sites $(il) $(il-1): Energy $(e1[1]), trunc $(ϵ) D $(dim(codomain(mps[il])))")
             end

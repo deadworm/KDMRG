@@ -2,25 +2,16 @@
 using ITensors, ITensorMPS
 @time begin
     let
+        include("readdata.jl")
+        N = 2 * Nk
+
         # lx = 1
         # ly = 4
         # N = lx * ly
-        include("readdata.jl")
-        N = 2 * Nk
+
         sites = siteinds("Electron", N; conserve_qns=true)
 
         os = OpSum()
-        # for j = 1:N-2
-        #     os += "Sz", j, "Sz", j + 2
-        #     os += 1 / 2, "S+", j, "S-", j + 2
-        #     os += 1 / 2, "S-", j, "S+", j + 2
-        # end
-        # for j = 1:N-1
-        #     os += "Sz", j, "Sz", j + 1
-        #     os += 1 / 2, "S+", j, "S-", j + 1
-        #     os += 1 / 2, "S-", j, "S+", j + 1
-        # end
-
         # for ix = 1:lx-1
         #     for iy = 1:ly-1
         #         os += "Cdagup", (ix - 1) * ly + iy, "Cup", (ix - 1) * ly + iy + 1
@@ -69,7 +60,7 @@ using ITensors, ITensorMPS
                                 for iq2 = 1:Nk
                                     for ib1 = 1:2
                                         for ib2 = 1:2
-                                            if tsla1[(ik1-1)*2+ia1, (ik2-1)*2+ia2] != 0 && tsla2[(iq1-1)*2+ib1, (iq2-1)*2+ib2] != 0
+                                            if abs(tsla1[(ik1-1)*2+ia1, (ik2-1)*2+ia2]) > 1e-9 && abs(tsla2[(iq1-1)*2+ib1, (iq2-1)*2+ib2]) > 1e-9
                                                 os += tsla1[(ik1-1)*2+ia1, (ik2-1)*2+ia2] * tsla2[(iq1-1)*2+ib1, (iq2-1)*2+ib2], "Cdagup", (ik1 - 1) * 2 + ia1, "Cup", (ik2 - 1) * 2 + ia2, "Cdagup", (iq1 - 1) * 2 + ib1, "Cup", (iq2 - 1) * 2 + ib2
                                                 os += tsla1[(ik1-1)*2+ia1, (ik2-1)*2+ia2] * tsla2[(iq1-1)*2+ib1, (iq2-1)*2+ib2], "Cdagup", (ik1 - 1) * 2 + ia1, "Cup", (ik2 - 1) * 2 + ia2, "Cdagdn", (iq1 - 1) * 2 + ib1, "Cdn", (iq2 - 1) * 2 + ib2
                                                 os += tsla1[(ik1-1)*2+ia1, (ik2-1)*2+ia2] * tsla2[(iq1-1)*2+ib1, (iq2-1)*2+ib2], "Cdagdn", (ik1 - 1) * 2 + ia1, "Cdn", (ik2 - 1) * 2 + ia2, "Cdagup", (iq1 - 1) * 2 + ib1, "Cup", (iq2 - 1) * 2 + ib2
@@ -85,7 +76,7 @@ using ITensors, ITensorMPS
             end
         end
 
-        H = MPO(os, sites, splitblocks=true)
+        H = MPO(os, sites; splitblocks = true)
 
         # state = ["Up","Up","Up","Up","Up","Up","Up","Up"]
         Eki = zeros(1, Nk)

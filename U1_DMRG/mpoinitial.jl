@@ -193,7 +193,6 @@ function autompo(l, mpochain, phySpace)
     MPO = Vector{TensorMap}(undef, l)
 
     for il = 1:l
-        # il=1
         ml = maximum(siteterms[il][:, 5])
         mr = maximum(siteterms[il][:, 6])
         mllist = Vector(undef, ml)
@@ -237,13 +236,13 @@ function autompo(l, mpochain, phySpace)
         blspace = Rep[U₁×U₁](bld)
         brspace = Rep[U₁×U₁](brd)
 
-        MPO[il] = TensorMap(zeros, ComplexF64, blspace ⊗ phySpace, phySpace ⊗ brspace)
+        MPO[il] = zeros(ComplexF64, blspace ⊗ phySpace, phySpace ⊗ brspace)
         for (f1, f2) in fusiontrees(MPO[il])
             phyr = dicphys[f1.uncoupled[2]]
             phyc = dicphys[f2.uncoupled[1]]
             dim1 = bld[f1.uncoupled[1]]
             dim4 = brd[f2.uncoupled[2]]
-            datab = zeros(Complex{Float64}, dim1, 1, 1, dim4)
+            datab = zeros(ComplexF64, dim1, 1, 1, dim4)
             for (i1, id1) in enumerate(dllist[f1.uncoupled[1]])
                 for (i4, id4) in enumerate(drlist[f2.uncoupled[2]])
                     if ((siteterms[il][:, 5] .== id1)' * (siteterms[il][:, 6] .== id4)) != 0
@@ -261,13 +260,49 @@ function autompo(l, mpochain, phySpace)
     end
 
     #finish MPO and use svd to compress
-    # for il = 1:l-1
-    #     MPO[il], S, V, ϵ = tsvd(MPO[il], (1, 2, 3), (4,); trunc=truncdim(mpod), alg=TensorKit.SVD())
-    #     println("MPO $(il) $(il+1): trunc $(ϵ) D $(dim(domain(MPO[il])))")
-    #     MPO[il] = permute(MPO[il], (1, 2), (3, 4))
-    #     mbash = S * V
-    #     @tensor MPO[il+1][o1 p11; p21 o2] := mbash[o1 o0] * MPO[il+1][o0 p11 p21 o2]
-    # end
+    for il = 1:l-1
+        MPO[il], S, V, ϵ = svd_trunc(permute(MPO[il], ((1, 2, 3), (4,))); trunc=trunctol(; atol = 1e-16))
+        println("MPO $(il) $(il+1): trunc $(ϵ) D $(dim(domain(MPO[il])))")
+        MPO[il] = permute(MPO[il], ((1, 2), (3, 4)))
+        mbash = S * V
+        @tensor MPO[il+1][o1 p11; p21 o2] := mbash[o1 o0] * MPO[il+1][o0 p11 p21 o2]
+    end
+    for il = l:-1:2
+        U, S, MPO[il], ϵ = svd_trunc(permute(MPO[il], ((1,), (2, 3, 4))); trunc=trunctol(; atol = 1e-16))
+        # println("MPO $(il) $(il-1): trunc $(ϵ) D $(dim(codomain(MPO[il])))")
+        MPO[il] = permute(MPO[il], ((1, 2), (3, 4)))
+        mbash = U * S
+        @tensor MPO[il-1][o1 p11; p21 o2] := MPO[il-1][o1 p11 p21 o0] * mbash[o0 o2]
+    end
 
     return MPO
+end
+
+#return mpo*mpo'  
+function mpo_mpo⁺(l, mpo)
+    newmpo = Vector{TensorMap}(undef, l)
+    for il = 1:l
+        mpolp = permute(mpo[il]', ((3, 1), (4, 2)))
+        @tensor cnmpo[o1 o1p p1; p1p o2 o2p] := mpo[il][o1 p1; p0 o2] * mpolp[o1p p0; p1p o2p]
+        isol = isometry(fuse(codomain(cnmpo, 1) ⊗ codomain(cnmpo, 2)), codomain(cnmpo, 1) ⊗ codomain(cnmpo, 2))
+        isor = isometry(domain(cnmpo, 2) ⊗ domain(cnmpo, 3), fuse(domain(cnmpo, 2) ⊗ domain(cnmpo, 3)))
+        @tensor newmpo[il][o1n p1; p1p o2n] := isol[o1n; o1 o1p] * cnmpo[o1 o1p p1; p1p o2 o2p] * isor[o2 o2p; o2n]
+    end
+    MPO = newmpo
+    #finish MPO and use svd to compress
+    for il = l:-1:2
+        U, S, MPO[il], ϵ = svd_trunc(permute(MPO[il], ((1,), (2, 3, 4))); trunc=trunctol(; atol = 1e-10))
+        # println("MPO $(il) $(il-1): trunc $(ϵ) D $(dim(codomain(MPO[il])))")
+        MPO[il] = permute(MPO[il], ((1, 2), (3, 4)))
+        mbash = U * S
+        @tensor MPO[il-1][o1 p11; p21 o2] := MPO[il-1][o1 p11 p21 o0] * mbash[o0 o2]
+    end
+    for il = 1:l-1
+        MPO[il], S, V, ϵ = svd_trunc(permute(MPO[il], ((1, 2, 3), (4,))); trunc=trunctol(; atol = 1e-10))
+        # println("MPO $(il) $(il+1): trunc $(ϵ) D $(dim(domain(MPO[il])))")
+        MPO[il] = permute(MPO[il], ((1, 2), (3, 4)))
+        mbash = S * V
+        @tensor MPO[il+1][o1 p11; p21 o2] := mbash[o1 o0] * MPO[il+1][o0 p11 p21 o2]
+    end
+    return newmpo
 end

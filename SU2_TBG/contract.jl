@@ -35,13 +35,13 @@ end
 #For compute lt and rt
 function ltrt!(lt, rt, mps, mpo, l)
     for im in eachindex(mpo)
-        lt[im, 1] = TensorMap(ones, space(mps[1], 1)', space(mps[1], 1)' ⊗ space(mpo[im][1], 1))
+        lt[im, 1] = ones(ComplexF64, space(mps[1], 1)', space(mps[1], 1)' ⊗ space(mpo[im][1], 1))
         for il = 2:l+1
-            lt[im, il] = cmpsleft(lt[im, il-1], mps[il-1], mpo[im][il-1], permute(mps[il-1]', (3,), (1, 2)))
+            lt[im, il] = cmpsleft(lt[im, il-1], mps[il-1], mpo[im][il-1], permute(mps[il-1]', ((3,), (1, 2))))
         end
-        rt[im, l+1] = TensorMap(ones, space(mps[l], 3)', space(mps[l], 3)' ⊗ space(mpo[im][l], 4))
+        rt[im, l+1] = ones(ComplexF64, space(mps[l], 3)', space(mps[l], 3)' ⊗ space(mpo[im][l], 4))
         for il = l:-1:1
-            rt[im, il] = cmpsright(rt[im, il+1], mps[il], mpo[im][il], permute(mps[il]', (3,), (1, 2)))
+            rt[im, il] = cmpsright(rt[im, il+1], mps[il], mpo[im][il], permute(mps[il]', ((3,), (1, 2))))
         end
     end
 end

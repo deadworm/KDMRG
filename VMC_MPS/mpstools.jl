@@ -116,48 +116,162 @@ function gn_update(m, wm, em, gm, Dm, dm)
     return FiniteMPS([nm[il] for il in 1:l])
 end
 
-#For mps stochastic-reconfiguration update
-function sr_update(m, wm, em, gm, Dm, dt)
-    lk=length(Dm)
-    configs=collect(keys(Dm))
-    cflist=zeros(ComplexF64, lk, lk)
-    enlist = [sqrt(Dm[cf][1]/wm) * (Dm[cf][3]-em) for cf in configs]
-    glist = [sqrt(Dm[cf][1]/wm) * (Dm[cf][4]-gm) for cf in configs]
-    for i1=1:lk
-        for i2=1:i1
-            cft=0
-            if i2 == i1
-                for il=1:l
-                    @planar cfb = glist[i1][il]'[r; l u] * glist[i2][il][l u; r]
-                    cft+=cfb
-                end
-                cflist[i1, i2] = real(cft)
-            else
-                for il=1:l
-                    @planar cfb = glist[i1][il]'[r; l u] * glist[i2][il][l u; r]
-                    cft+=cfb
-                end
-                cflist[i1, i2] = cft
-                cflist[i2, i1] = conj(cft)
+# A Hermitian matrix plus a scalar diagonal shift. Keeping the shift as an
+# operator avoids allocating a second (potentially GPU-resident) Gram matrix.
+struct SRShiftedHermitian{T,M<:AbstractMatrix{T},R<:Real} <: AbstractMatrix{T}
+    gram::M
+    shift::R
+end
+
+function SRShiftedHermitian(gram::M, shift::R) where {T,M<:AbstractMatrix{T},R<:Real}
+    return SRShiftedHermitian{T,M,R}(gram, shift)
+end
+
+Base.size(A::SRShiftedHermitian) = size(A.gram)
+Base.axes(A::SRShiftedHermitian) = axes(A.gram)
+
+function LinearAlgebra.mul!(y::AbstractVector, A::SRShiftedHermitian, x::AbstractVector)
+    mul!(y, A.gram, x)
+    y .+= A.shift .* x
+    return y
+end
+
+# Flatten the symmetry blocks of all log-derivative tensors into columns. The
+# resulting dense matrix lets BLAS/cuBLAS replace O(nsamples^2 * nsites) many
+# small TensorKit contractions with one large matrix multiplication.
+function sr_pack_gradients(gm, Dm, wm, em, ::Type{RT}) where {RT<:AbstractFloat}
+    isempty(Dm) && throw(ArgumentError("sr_update requires at least one sample"))
+    isempty(gm) && throw(ArgumentError("sr_update requires at least one MPS tensor"))
+    isfinite(wm) && wm > 0 || throw(ArgumentError("wm must be finite and positive"))
+
+    configs = collect(keys(Dm))
+    CT = Complex{RT}
+    ST = sectortype(gm[1])
+    layout = Vector{Vector{Tuple{ST,UnitRange{Int}}}}(undef, length(gm))
+    offset = 0
+    for il in eachindex(gm)
+        site_layout = Tuple{ST,UnitRange{Int}}[]
+        for sector in blocksectors(gm[il])
+            block_length = length(block(gm[il], sector))
+            range = (offset + 1):(offset + block_length)
+            push!(site_layout, (sector, range))
+            offset += block_length
+        end
+        layout[il] = site_layout
+    end
+
+    gradients = Matrix{CT}(undef, offset, length(configs))
+    energies = Vector{CT}(undef, length(configs))
+    for (ik, cf) in enumerate(configs)
+        sample_weight = Dm[cf][1]
+        isfinite(sample_weight) && sample_weight >= 0 ||
+            throw(ArgumentError("sample weights must be finite and nonnegative"))
+        scale = sqrt(RT(sample_weight / wm))
+        energies[ik] = scale * (Dm[cf][3] - em)
+        sample_gradient = Dm[cf][4]
+        length(sample_gradient) == length(gm) ||
+            throw(DimensionMismatch("sample and mean gradients have different lengths"))
+
+        for il in eachindex(gm)
+            for (sector, range) in layout[il]
+                source = vec(block(sample_gradient[il], sector))
+                mean_source = vec(block(gm[il], sector))
+                length(source) == length(range) ||
+                    throw(DimensionMismatch("incompatible TensorMap blocks in sample gradient"))
+                destination = @view gradients[range, ik]
+                @. destination = scale * (source - mean_source)
             end
         end
     end
-    ylist, cglog = cg(Hermitian(cflist+1e-4*sum(diag(cflist))/lk*I), enlist; reltol=1e-5, maxiter=5lk, log=true)
+    return gradients, energies, layout
+end
+
+function sr_solve(gradients, energies, regularization, reltol, maxiter, use_gpu)
+    lk = length(energies)
+    RT = real(eltype(gradients))
+    mean_diagonal = real(sum(abs2, gradients)) / lk
+    shift = RT(regularization) * max(mean_diagonal, eps(RT))
+
+    if use_gpu
+        device_gradients = CUDA.CuArray(gradients)
+        device_energies = CUDA.CuArray(energies)
+        gram = Hermitian(adjoint(device_gradients) * device_gradients)
+        coefficients, history = cg(
+            SRShiftedHermitian(gram, shift), device_energies;
+            reltol=RT(reltol), maxiter=maxiter, log=true,
+        )
+        update = Array(device_gradients * coefficients)
+    else
+        gram = Hermitian(adjoint(gradients) * gradients)
+        coefficients, history = cg(
+            SRShiftedHermitian(gram, shift), energies;
+            reltol=RT(reltol), maxiter=maxiter, log=true,
+        )
+        update = gradients * coefficients
+    end
+    return update, history, shift
+end
+
+function sr_cuda_enabled(backend)
+    backend in (:auto, :cpu, :gpu) ||
+        throw(ArgumentError("backend must be :auto, :cpu, or :gpu"))
+    backend === :cpu && return false
+
+    functional = CUDA.functional()
+    backend === :gpu && !functional &&
+        throw(ArgumentError("backend=:gpu requested, but CUDA is not functional"))
+    return functional
+end
+
+"""
+    sr_update(m, wm, em, gm, Dm, dt; backend=:auto, precision=Float64,
+              regularization=1e-4, reltol=1e-5, maxiter=5length(Dm))
+
+Apply a stochastic-reconfiguration update. With `backend=:auto`, the dense Gram
+matrix construction, conjugate-gradient solve, and parameter update run on an
+NVIDIA GPU when CUDA is functional, and otherwise fall back to CPU BLAS.
+
+Set `backend=:gpu` to require CUDA or `backend=:cpu` to disable it. `Float64`
+preserves the previous numerical precision; `precision=Float32` is usually
+faster on consumer GPUs and uses half as much device memory.
+"""
+function sr_update(
+    m, wm, em, gm, Dm, dt;
+    backend=:auto,
+    precision::Type{<:AbstractFloat}=Float64,
+    regularization::Real=1e-4,
+    reltol::Real=1e-5,
+    maxiter::Integer=5length(Dm),
+)
+    regularization >= 0 || throw(ArgumentError("regularization must be nonnegative"))
+    reltol > 0 || throw(ArgumentError("reltol must be positive"))
+    maxiter > 0 || throw(ArgumentError("maxiter must be positive"))
+    length(m) == length(gm) ||
+        throw(DimensionMismatch("MPS and mean gradient have different lengths"))
+
+    use_gpu = sr_cuda_enabled(backend)
+    gradients, energies, layout = sr_pack_gradients(gm, Dm, wm, em, precision)
+    update, cglog, shift = sr_solve(
+        gradients, energies, regularization, reltol, Int(maxiter), use_gpu,
+    )
+    println(
+        "SR backend: ", use_gpu ? "CUDA" : "CPU",
+        ", samples: ", length(Dm),
+        ", parameters: ", size(gradients, 1),
+        ", diagonal shift: ", shift,
+    )
     @show cglog
-    nm=Vector{TensorMap}(undef, l)
-    for il=1:l
-        nm[il] = copy(m[il])
-    end
-    ∂m_norm=0
-    for il=1:l
-        for ik=1:lk
-            ∂m = glist[ik][il] * ylist[ik]
-            nm[il] = nm[il] - dt * ∂m
+
+    nm = [copy(m[il]) for il in eachindex(m)]
+    for il in eachindex(nm)
+        for (sector, range) in layout[il]
+            destination = vec(block(nm[il], sector))
+            destination .-= dt .* @view(update[range])
         end
-        ∂m_norm+=norm(nm[il]-m[il])
     end
-    @show ∂m_norm
-    return FiniteMPS([nm[il] for il in 1:l])
+    # ∂m_norm = sum(norm(nm[il] - m[il]) for il in eachindex(m))
+    @show [norm(nm[il] - m[il]) for il in eachindex(m)]
+    return FiniteMPS(nm)
 end
 
 #For computing the entanglement entropy

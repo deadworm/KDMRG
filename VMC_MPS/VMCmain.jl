@@ -3,6 +3,7 @@ using Pkg;
 Pkg.activate(".")
 using TensorKit, MPSKit
 using LinearAlgebra, Random, StatsBase, IterativeSolvers
+using CUDA
 using Plots
 
 include("contract.jl")
@@ -17,7 +18,7 @@ srflag=true;
 t = 1
 V = 1
 l = 8
-n = l
+n = 6
 bond_dim = 20
 zb=Vect[FermionParity⊠U1Irrep]((0,0)=>1)
 nb=Vect[FermionParity⊠U1Irrep]((n%2,n)=>1)
@@ -25,7 +26,7 @@ m = rnd_mps(l, bond_dim);
 enstring = ms_Hamiltonian();
 
 α = 0.5
-dm = 0.1
+dm = 0.01
 gstep = 200
 mcsample = 1000
 

@@ -34,7 +34,7 @@ end
 #For the mc sampling
 function mc_sample(m, config0, mcsample, α)
     Dall = Dict{Vector{Int},ComplexF64}()
-    Dm = Dict{Vector{Int},Tuple{Float64,ComplexF64,ComplexF64,Vector{Any},Float64}}()
+    Dm = Dict{Vector{Int},Tuple{Float64,Float64,ComplexF64,ComplexF64,Vector{Any},Dict{Vector{Int},ComplexF64}}}()
     # 采样会访问 m.AL/m.AR 并移动 gauge center，之后 m[il] 会换成另一套规范，
     # 所以先固定一份张量：梯度和参数更新都必须基于这同一组张量
     mt=[copy(m[il]) for il=1:l]
@@ -61,35 +61,46 @@ function mc_sample(m, config0, mcsample, α)
         #measure observables here
         if !haskey(Dm, config0)
             co0=mps_slice(md, config0)
-            enm=observable_config(enstring, md, co0, config0, Dall)
+            (enm,Dc)=observable_config(enstring, md, co0, config0, Dall)
             gradm=measure_grad(md, co0, config0)
-            Dm[config0] = (wt/mcsample, co0, enm, gradm, wt^2/mcsample)
+            Dm[config0] = (wt/mcsample, wt^2/mcsample, co0, enm, gradm, Dc)
         else
-            Dm[config0] = (Dm[config0][1]+wt/mcsample, Dm[config0][2], Dm[config0][3], Dm[config0][4], Dm[config0][5]+wt^2/mcsample)
+            Dm[config0] = (Dm[config0][1]+wt/mcsample, Dm[config0][2]+wt^2/mcsample, Dm[config0][3], Dm[config0][4], Dm[config0][5], Dm[config0][6])
         end
     end
     wm = 0
     wm2 = 0
     for cf in keys(Dm)
         wm += Dm[cf][1]
-        wm2 += Dm[cf][5]
+        wm2 += Dm[cf][2]
     end
     em = 0
     for cf in keys(Dm)
-        em += Dm[cf][1] * Dm[cf][3] / wm
+        em += Dm[cf][1]/wm * Dm[cf][4] 
     end
     gm = Vector{Any}(undef, l)
     for il=1:l
         gm[il] = zeros(ComplexF64, size(md[il]))
         for cf in keys(Dm)
-            gm[il] += Dm[cf][1] * Dm[cf][4][il] / wm
+            gm[il] += Dm[cf][1]/wm * Dm[cf][5][il] 
         end
+    end
+    #ĥ(b) = conj( Σ_σ (w_σ/wm) * H_bσ / ψ(σ) ) ≈ ⟨b|H|ψ⟩/⟨ψ|ψ⟩（H 为实对称矩阵）
+    #-E|ψ⟩ 部分不在这里减：它在全空间上非零，由 residual_expand 在 MPS 层面精确处理
+    hb = Dict{Vector{Int},ComplexF64}()
+    for cs in keys(Dm)
+        for cb in keys(Dm[cs][6])
+            hb[cb] = get(hb, cb, 0.0im) + Dm[cs][1] / wm * Dm[cs][6][cb] / Dm[cs][3]
+        end
+    end
+    for cb in keys(hb)
+        hb[cb] = conj(hb[cb])
     end
 
     println("average energy: ", em)
     println("flip ratio: ", updt/totl)
     println("effective sample ratio: ", wm^2/wm2)
-    return wm, em, gm, Dm, mt
+    return wm, em, gm, Dm, mt, hb
 end
 
 #For energy gradient measurement
@@ -108,7 +119,7 @@ function measure_grad(md, co0, config0)
     mg=Vector{Any}(undef, l)
     for il=1:l
         mb=zeros(ComplexF64, size(md[il]))
-        mb[:, s2p[config0[(il-1)*2+1], config0[(il-1)*2+2]], :]=kron(vl[il],vr[il+1])
+        mb[:, s2p[config0[(il-1)*2+1], config0[(il-1)*2+2]], :]=kron(vl[il], vr[il+1])
         mg[il]=mb/conj(co0)
     end
     return mg

@@ -1,47 +1,3 @@
-#For initial random mps
-function rnd_mps(l, bond_dim)
-    B = Vector{typeof(zb)}(undef, l + 1)
-    B[1] = zb
-    # 构造中间虚键：B[i + 1] 对应第 i 个站点之后的键
-    for i in 1:(l-1)
-        qmin = max(0, n - 2 * (l - i))
-        qmax = min(2 * i, n)
-        charges = collect(qmin:qmax)
-        nsectors = length(charges)
-        # 将最大维数尽量平均分配给各个允许的电荷扇区
-        base, remainder = divrem(bond_dim, nsectors)
-        sector_dims = [
-            (q % 2, q) => base + (j <= remainder ? 1 : 0)
-            for (j, q) in enumerate(charges)
-        ]
-        B[i+1] = Vect[FermionParity⊠U1Irrep](sector_dims...)
-    end
-    # 固定右边界，从而保证整个 MPS 的总粒子数为 n
-    B[end] = nb
-    tensors = Vector{TensorMap}(undef, l)
-    for i in 1:l
-        tensors[i] = randn(ComplexF64, B[i] ⊗ phySpace ← B[i+1])
-    end
-    m = FiniteMPS([tensors[i] for i in 1:l])
-    m = changebonds(m, RandExpand(trscheme=truncdim(bond_dim)))
-    m = changebonds(m, SvdCut(trscheme=truncdim(bond_dim)))
-    @show [dim(space(m[i], 3)) for i in 1:l]
-    return m
-end
-
-#For expanding the active bond of mps
-function expand_active(m, active; add=4, noise=1e-3)
-    # Frozen exterior bonds have rank one, with fixed cumulative U(1) charges.
-    sub=FiniteMPS([ComplexF64(1)*copy(m[j]) for j in active])
-    sub=changebonds(sub, RandExpand(trscheme=truncdim(add)))
-    raw=[ComplexF64(1)*copy(m[j]) for j in 1:length(m)]
-    for (k, j) in enumerate(active)
-        raw[j]=copy(sub[k])
-        raw[j].data .+= noise*randn(ComplexF64, length(raw[j].data))/sqrt(length(raw[j].data))
-    end
-    return normalize!(FiniteMPS(raw))
-end
-
 #For initial direct-product mps
 function prod_mps(config0)
     B = Vector{typeof(zb)}(undef, l + 1)
@@ -72,7 +28,7 @@ function mps_slice(md, config0)
 end
 
 #For computing observables [coefficient, site1, site2, ...] for each term
-function observable_config(ostring, md, cm, config0, Dall)
+function observable_config(ostring, md, co0, config0, Dall)
     oterms=size(ostring, 1)
     olength=size(ostring, 2)
     oc=ostring[:, 1]
@@ -111,9 +67,12 @@ function observable_config(ostring, md, cm, config0, Dall)
             osum+=Dc[cf] * Dall[cf]
         end
     end
-    olocal=osum / cm
-    return olocal
+    return osum/co0, Dc
 end
+
+# ---------------------------------------------------------------------------
+# MPS梯度下降：用采样构型计算MPS每个参数的自然梯度
+# ---------------------------------------------------------------------------
 
 #稠密数组中对称性允许的元素的线性指标（其余位置恒为 0，不是独立参数）
 function sr_param_index(t)
@@ -145,11 +104,14 @@ function sr_update(mt, wm, em, gm, Dm, dt; regularization=1e-2)
     Y=Matrix{ComplexF64}(undef, np, lk)
     e=Vector{ComplexF64}(undef, lk)
     for (k, cf) in enumerate(configs)
-        (wk, _, enm, gradm) = Dm[cf]
+        (wk, _, _, enm, gradm) = Dm[cf]
         s=sqrt(wk/wm)
         e[k]=s*(enm-em)
         for il=1:l
-            g=gradm[il]; g0=gm[il]; ix=idx[il]; o=offs[il]
+            g=gradm[il]
+            g0=gm[il]
+            ix=idx[il]
+            o=offs[il]
             @inbounds for j in eachindex(ix)
                 Y[o+j, k]=s*(g[ix[j]]-g0[ix[j]])
             end
@@ -196,4 +158,129 @@ function mps_entropy(m, l)
         entropy_list[b] = S
     end
     return entropy_list
+end
+
+# ---------------------------------------------------------------------------
+# 残差扩维：用采样构型经 H 散射得到的新构型扩充 MPS 的键维
+# ---------------------------------------------------------------------------
+
+#稠密指标对应的对称性扇区：GradedSpace 的稠密排布按 sectors(V) 的顺序，每个扇区连续占 dim(V, c) 个位置
+dense_sectors(V) = [c for c in sectors(V) for _ in 1:dim(V, c)]
+
+#一步虚时演化 |T⟩ = |ψ⟩ - Δτ (H-E)|ψ⟩ = cψ|ψ⟩ - Δτ H|ψ⟩，cψ = 1 + Δτ E
+#H|ψ⟩ 由采样给出：h(b) = ‖ψ‖² ĥ(b)，只在 hb 的构型上非零；-E|ψ⟩ 在全空间上精确保留在 cψ|ψ⟩ 中
+#从左到右逐键做 TT-SVD：第 i 步已有新的左正交基 B[1..i-1]，把 |T⟩ 投影到 span{B}⊗(第 i 个格点) 上，
+#对约化密度矩阵 ρ = T T† 按扇区对角化，保留 min(D_i + Δb, maxdim) 个最大本征态作为新的 B[i]。
+#ψ 取中心在 i 的混合正则形式 ψ = AL[1..i-1] AC[i] AR[i+1..l]，右侧基 |R_β⟩ 正交归一，于是
+#  ρ = Y Y† - Δτ (Y G† + G Y†) + Δτ² V V†
+#  Y[(α,s),β] = cψ Σ_α' E[α,α'] AC[α',s,β]，               E[α,α'] = ⟨B_α|AL_α'⟩
+#  G[(α,s),β] = Σ_k h_k conj(λ_k[α]) δ_{s,s_k} conj(R_k[β])，λ_k = 构型 k 前缀在 B 下的行向量，R_k = 后缀在 AR 下的列向量
+#  V[(α,s),σR] = Σ_{k: 后缀为 σR} h_k conj(λ_k[α]) δ_{s,s_k}
+function residual_expand(mt, hb, em, Δτ, Δb, maxdim; tol=1e-14)
+    ψ=FiniteMPS([ComplexF64(1)*copy(mt[il]) for il=1:l])
+    ALd=[convert(Array, ψ.AL[il]) for il=1:l]
+    ARd=[convert(Array, ψ.AR[il]) for il=1:l]
+    ACd=[convert(Array, ψ.AC[il]) for il=1:l]
+    d=dim(phySpace)
+    psec=dense_sectors(phySpace)
+    cψ=1 + Δτ*real(em)
+    nrm2=norm(ψ)^2
+
+    cbs=collect(keys(hb))
+    nk=length(cbs)
+    rv=[nrm2*hb[cb] for cb in cbs]
+    ps=[[s2p[cb[2*il-1], cb[2*il]] for il=1:l] for cb in cbs]
+
+    #R[k][il]：构型 k 在格点 il 右侧的后缀在 ψ 右正交基下的列向量（长度 = 第 il 个键的维数）
+    R=[Vector{Vector{ComplexF64}}(undef, l) for _ in 1:nk]
+    for k=1:nk
+        R[k][l]=ComplexF64[1]
+        for il=l:-1:2
+            R[k][il-1]=ARd[il][:, ps[k][il], :] * R[k][il]
+        end
+    end
+
+    λ=[ComplexF64[1] for _ in 1:nk]   #构型前缀在新基 B 下的行向量 (存为列向量)
+    E=ones(ComplexF64, 1, 1)          #E[α,α'] = ⟨B_α|AL_α'⟩
+    Vl=codomain(ψ.AL[1])[1]
+    Bs=Vector{TensorMap}(undef, l)
+    for il=1:l
+        Dl=size(E, 1)
+        Dr=size(ACd[il], 3)
+        Y=cψ * reshape(E * reshape(ACd[il], size(ACd[il], 1), :), Dl*d, Dr)
+
+        #U[:, k] = h_k conj(λ_k) ⊗ e_{s_k}
+        U=zeros(ComplexF64, Dl*d, nk)
+        for k=1:nk
+            o=(ps[k][il]-1)*Dl
+            U[(o+1):(o+Dl), k] .= rv[k] .* conj.(λ[k])
+        end
+        G=U * reduce(hcat, (R[k][il] for k=1:nk))'
+
+        if il == l
+            #最后一个格点右键维数为 1，直接把投影后的目标态放进去
+            Bd=reshape(Y - Δτ * G, Dl, d, Dr)
+            Vr=domain(ψ.AL[l])[1]
+            Bs[il]=TensorMap(Bd, Vl ⊗ phySpace ← Vr)
+            break
+        end
+
+        #同一后缀的构型相干叠加：V = U S，S 为构型→后缀的指示矩阵
+        suf=Dict{Vector{Int},Int}()
+        sidx=[get!(suf, cbs[k][(2*il+1):end], length(suf)+1) for k=1:nk]
+        Vm=zeros(ComplexF64, Dl*d, length(suf))
+        for k=1:nk
+            Vm[:, sidx[k]] .+= @view U[:, k]
+        end
+        YG=Y * G'
+        ρ=Y * Y' - Δτ * (YG + YG') + Δτ^2 * (Vm * Vm')
+
+        #(α,s) 行的扇区 = sector(α) ⊗ sector(s)；ρ 在扇区上块对角，逐块对角化
+        lsec=dense_sectors(Vl)
+        rowsec=[first(lsec[a] ⊗ psec[s]) for s=1:d for a=1:Dl]
+        cands=Tuple{Float64,eltype(rowsec),Vector{ComplexF64}}[]
+        rows=Dict{eltype(rowsec),Vector{Int}}()
+        for c in unique(rowsec)
+            ix=findall(==(c), rowsec)
+            rows[c]=ix
+            F=eigen(Hermitian(ρ[ix, ix]))
+            for j in eachindex(F.values)
+                push!(cands, (F.values[j], c, F.vectors[:, j]))
+            end
+        end
+        sort!(cands; by=x -> -x[1])
+        λmax=max(cands[1][1], eps())
+        nkeep=min(Dr + Δb, maxdim, count(x -> x[1] > tol*λmax, cands))
+        kept=cands[1:nkeep]
+
+        #新的右键空间；稠密列按 sectors(Vr) 的顺序排列
+        cnt=Dict{eltype(rowsec),Int}()
+        for (_, c, _) in kept
+            cnt[c]=get(cnt, c, 0)+1
+        end
+        Vr=Vect[FermionParity⊠U1Irrep]((c => nc for (c, nc) in cnt)...)
+        Bm=zeros(ComplexF64, Dl*d, nkeep)
+        j=0
+        for c in sectors(Vr)
+            for (_, c1, v) in kept
+                c1 == c || continue
+                j+=1
+                Bm[rows[c], j] .= v
+            end
+        end
+        Bd=reshape(Bm, Dl, d, nkeep)
+        Bs[il]=TensorMap(Bd, Vl ⊗ phySpace ← Vr)
+
+        #更新左环境：E ← Σ_s B_s† E AL_s，λ_k ← λ_k B_{s_k}
+        Enew=zeros(ComplexF64, nkeep, size(ALd[il], 3))
+        for s=1:d
+            Enew+=Bd[:, s, :]' * E * ALd[il][:, s, :]
+        end
+        E=Enew
+        for k=1:nk
+            λ[k]=transpose(Bd[:, ps[k][il], :]) * λ[k]
+        end
+        Vl=Vr
+    end
+    return normalize!(FiniteMPS([Bs[il] for il=1:l]))
 end

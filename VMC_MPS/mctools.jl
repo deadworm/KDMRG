@@ -38,10 +38,7 @@ function mc_sample(m, config0, mcsample, α)
     # 采样会访问 m.AL/m.AR 并移动 gauge center，之后 m[il] 会换成另一套规范，
     # 所以先固定一份张量：梯度和参数更新都必须基于这同一组张量
     mt=[copy(m[il]) for il=1:l]
-    md=Vector{Any}(undef, l)
-    for il=1:l
-        md[il]=convert(Array, mt[il])
-    end
+    As=dense_slices(mt)
 
     # 规范变换只做一次，采样循环里不再反复访问 m.AL/m.AR
     ARd=dense_slices([m.AR[il] for il=1:l])
@@ -60,9 +57,9 @@ function mc_sample(m, config0, mcsample, α)
 
         #measure observables here
         if !haskey(Dm, config0)
-            co0=mps_slice(md, config0)
-            (enm,Dc)=observable_config(enstring, md, co0, config0, Dall)
-            gradm=measure_grad(md, co0, config0)
+            co0=mps_amp(As, config0)
+            (enm,Dc)=observable_config(enstring, As, co0, config0, Dall)
+            gradm=measure_grad(As, co0, config0)
             Dm[config0] = (wt/mcsample, wt^2/mcsample, co0, enm, gradm, Dc)
         else
             Dm[config0] = (Dm[config0][1]+wt/mcsample, Dm[config0][2]+wt^2/mcsample, Dm[config0][3], Dm[config0][4], Dm[config0][5], Dm[config0][6])
@@ -80,7 +77,7 @@ function mc_sample(m, config0, mcsample, α)
     end
     gm = Vector{Any}(undef, l)
     for il=1:l
-        gm[il] = zeros(ComplexF64, size(md[il]))
+        gm[il] = zeros(ComplexF64, slices_size(As[il]))
         for cf in keys(Dm)
             gm[il] += Dm[cf][1]/wm * Dm[cf][5][il] 
         end
@@ -103,22 +100,26 @@ function mc_sample(m, config0, mcsample, α)
     return wm, em, gm, Dm, mt, hb
 end
 
+#稠密切片对应的三维数组尺寸 (Dl, d, Dr)
+slices_size(Asl) = (size(Asl[1], 1), length(Asl), size(Asl[1], 2))
+
 #For energy gradient measurement
-function measure_grad(md, co0, config0)
+#As[il][c] 为稠密切片（见 dense_slices）
+function measure_grad(As, co0, config0)
     vl = Vector{Any}(undef, l + 1)
     vr = Vector{Any}(undef, l + 1)
     vl[1] = ComplexF64[1]
     for il = 2:(l+1)
-        vl[il] = md[il-1][:, s2p[config0[(il-2)*2+1], config0[(il-2)*2+2]], :]' * vl[il-1]
+        vl[il] = As[il-1][s2p[config0[(il-2)*2+1], config0[(il-2)*2+2]]]' * vl[il-1]
     end
     vr[l+1] = ComplexF64[1]
     for il = l:-1:1
-        vr[il] = vr[il+1] * md[il][:, s2p[config0[(il-1)*2+1], config0[(il-1)*2+2]], :]'
+        vr[il] = vr[il+1] * As[il][s2p[config0[(il-1)*2+1], config0[(il-1)*2+2]]]'
     end
 
     mg=Vector{Any}(undef, l)
     for il=1:l
-        mb=zeros(ComplexF64, size(md[il]))
+        mb=zeros(ComplexF64, slices_size(As[il]))
         mb[:, s2p[config0[(il-1)*2+1], config0[(il-1)*2+2]], :]=kron(vl[il], vr[il+1])
         mg[il]=mb/conj(co0)
     end

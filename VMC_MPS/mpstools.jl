@@ -18,17 +18,18 @@ function prod_mps(config0)
     return mf
 end
 
-#For computing the slice of mps
-function mps_slice(md, config0)
-    v=ComplexF64[1]
-    for il=1:l
-        v=v*md[il][:, s2p[config0[(il-1)*2+1], config0[(il-1)*2+2]], :]
+#For computing the amplitude of a configuration
+#As[il][c] 为稠密切片（见 dense_slices），避免每步从三维数组切片拷贝
+function mps_amp(As, cf)
+    v=As[1][s2p[cf[1], cf[2]]]
+    for il=2:l
+        v=v*As[il][s2p[cf[2*il-1], cf[2*il]]]
     end
     return v[1]
 end
 
-#For computing observables [coefficient, site1, site2, ...] for each term
-function observable_config(ostring, md, co0, config0, Dall)
+#For computing obsevrables [coefficient, site1, site2, ...] for each term
+function observable_config(ostring, As, co0, config0, Dall)
     oterms=size(ostring, 1)
     olength=size(ostring, 2)
     oc=ostring[:, 1]
@@ -63,7 +64,7 @@ function observable_config(ostring, md, co0, config0, Dall)
         if haskey(Dall, cf)
             osum+=Dc[cf] * Dall[cf]
         else
-            Dall[cf] = mps_slice(md, cf)
+            Dall[cf] = mps_amp(As, cf)
             osum+=Dc[cf] * Dall[cf]
         end
     end
@@ -92,7 +93,8 @@ end
 
 #For mps stochastic-reconfiguration update
 #regularization: 对角偏移 λ 相对于 S 对角元平均值 tr(S)/Np 的比例
-function sr_update(mt, wm, em, gm, Dm, dt; regularization=1e-2)
+#max_dist: 一阶 Fubini–Study 距离 dt·sqrt(δ†Sδ) 的上限，超过则按比例缩小 dt（信赖域），防止沿梯度走太远
+function sr_update(mt, wm, em, gm, Dm, dt; regularization=1e-2, max_dist=0.05)
     lk=length(Dm)
     lk > 0 || error("sr_update: no samples")
     configs=collect(keys(Dm))
@@ -119,26 +121,37 @@ function sr_update(mt, wm, em, gm, Dm, dt; regularization=1e-2)
     end
 
     # S = Y Y'（np×np），F = Y e；δ = (S+λ)^-1 F = Y (Y'Y+λ)^-1 e。在较小的空间里求解
+    # δ†Sδ = ‖Y'δ‖²：参数空间里用 S 直接算，样本空间里 Y'δ = T x
     if np <= lk
         S=Y*Y'
         shift=regularization*max(real(tr(S))/np, eps())
         δ=sr_solve(S, shift, Y*e)
+        δSδ=real(dot(δ, S*δ))
         solved="parameter space"
     else
         T=Y'*Y
         shift=regularization*max(real(tr(T))/np, eps())
-        δ=Y*sr_solve(T, shift, e)
+        x=sr_solve(T, shift, e)
+        δ=Y*x
+        δSδ=sum(abs2, T*x)
         solved="sample space"
     end
     all(isfinite, δ) || error("sr_update: non-finite update (shift=$shift)")
     println("SR: parameter space Np=", np, " (dense ", sum(length, gm), "), sample space lk=", lk,
         ", solved in ", solved, ", shift=", shift)
 
-    nm=map(1:l) do il
-        ∂m=zeros(ComplexF64, size(gm[il]))
-        ∂m[idx[il]] .= @view δ[(offs[il]+1):offs[il+1]]
-        mt[il] - dt * TensorMap(∂m, space(mt[il]))
+    ∂m=map(1:l) do il
+        ∂=zeros(ComplexF64, size(gm[il]))
+        ∂[idx[il]] .= @view δ[(offs[il]+1):offs[il+1]]
+        TensorMap(∂, space(mt[il]))
     end
+
+    # 信赖域：限制一阶预测的态变化 ‖δψ‖/‖ψ‖ = τ·sqrt(δ†Sδ)
+    dist=sqrt(max(δSδ, 0.0))
+    τ=dt*dist > max_dist ? max_dist/dist : dt
+    println("SR: metric step dt·|δ|_S = ", dt*dist, ", using τ = ", τ)
+
+    nm=[mt[il] - τ*∂m[il] for il=1:l]
     @show [norm(nm[il]-mt[il]) for il=1:l]
     return FiniteMPS(nm)
 end
@@ -167,31 +180,28 @@ end
 #稠密指标对应的对称性扇区：GradedSpace 的稠密排布按 sectors(V) 的顺序，每个扇区连续占 dim(V, c) 个位置
 dense_sectors(V) = [c for c in sectors(V) for _ in 1:dim(V, c)]
 
-#一步虚时演化 |T⟩ = |ψ⟩ - Δτ (H-E)|ψ⟩ = cψ|ψ⟩ - Δτ H|ψ⟩，cψ = 1 + Δτ E
-#H|ψ⟩ 由采样给出：h(b) = ‖ψ‖² ĥ(b)，只在 hb 的构型上非零；-E|ψ⟩ 在全空间上精确保留在 cψ|ψ⟩ 中
+#一步虚时演化 |T⟩ = |ψ⟩ - Δτ (H-E)|ψ⟩ = cm|ψ⟩ - Δτ H|ψ⟩，cm = 1 + Δτ E
 #从左到右逐键做 TT-SVD：第 i 步已有新的左正交基 B[1..i-1]，把 |T⟩ 投影到 span{B}⊗(第 i 个格点) 上，
 #对约化密度矩阵 ρ = T T† 按扇区对角化，保留 min(D_i + Δb, maxdim) 个最大本征态作为新的 B[i]。
 #ψ 取中心在 i 的混合正则形式 ψ = AL[1..i-1] AC[i] AR[i+1..l]，右侧基 |R_β⟩ 正交归一，于是
 #  ρ = Y Y† - Δτ (Y G† + G Y†) + Δτ² V V†
-#  Y[(α,s),β] = cψ Σ_α' E[α,α'] AC[α',s,β]，               E[α,α'] = ⟨B_α|AL_α'⟩
+#  Y[(α,s),β] = cm Σ_α' E[α,α'] AC[α',s,β]，               E[α,α'] = ⟨B_α|AL_α'⟩
 #  G[(α,s),β] = Σ_k h_k conj(λ_k[α]) δ_{s,s_k} conj(R_k[β])，λ_k = 构型 k 前缀在 B 下的行向量，R_k = 后缀在 AR 下的列向量
 #  V[(α,s),σR] = Σ_{k: 后缀为 σR} h_k conj(λ_k[α]) δ_{s,s_k}
-function residual_expand(mt, hb, em, Δτ, Δb, maxdim; tol=1e-14)
-    ψ=FiniteMPS([ComplexF64(1)*copy(mt[il]) for il=1:l])
-    ALd=[convert(Array, ψ.AL[il]) for il=1:l]
-    ARd=[convert(Array, ψ.AR[il]) for il=1:l]
-    ACd=[convert(Array, ψ.AC[il]) for il=1:l]
+function residual_expand(m, hb, em, Δτ, Δb, bond_dim; tol=1e-14)
+    ALd=[convert(Array, m.AL[il]) for il=1:l]
+    ARd=[convert(Array, m.AR[il]) for il=1:l]
+    ACd=[convert(Array, m.AC[il]) for il=1:l]
     d=dim(phySpace)
     psec=dense_sectors(phySpace)
-    cψ=1 + Δτ*real(em)
-    nrm2=norm(ψ)^2
+    cm=1 + Δτ*real(em)
 
     cbs=collect(keys(hb))
     nk=length(cbs)
-    rv=[nrm2*hb[cb] for cb in cbs]
+    rv=[hb[cb] for cb in cbs]
     ps=[[s2p[cb[2*il-1], cb[2*il]] for il=1:l] for cb in cbs]
 
-    #R[k][il]：构型 k 在格点 il 右侧的后缀在 ψ 右正交基下的列向量（长度 = 第 il 个键的维数）
+    #R[k][il]：构型 k 在格点 il 右侧的后缀在 m 右正交基下的列向量（长度 = 第 il 个键的维数）
     R=[Vector{Vector{ComplexF64}}(undef, l) for _ in 1:nk]
     for k=1:nk
         R[k][l]=ComplexF64[1]
@@ -202,25 +212,24 @@ function residual_expand(mt, hb, em, Δτ, Δb, maxdim; tol=1e-14)
 
     λ=[ComplexF64[1] for _ in 1:nk]   #构型前缀在新基 B 下的行向量 (存为列向量)
     E=ones(ComplexF64, 1, 1)          #E[α,α'] = ⟨B_α|AL_α'⟩
-    Vl=codomain(ψ.AL[1])[1]
+    Vl=zb
     Bs=Vector{TensorMap}(undef, l)
     for il=1:l
         Dl=size(E, 1)
         Dr=size(ACd[il], 3)
-        Y=cψ * reshape(E * reshape(ACd[il], size(ACd[il], 1), :), Dl*d, Dr)
+        Y=cm * reshape(E * reshape(ACd[il], size(ACd[il], 1), :), Dl*d, Dr)
 
         #U[:, k] = h_k conj(λ_k) ⊗ e_{s_k}
         U=zeros(ComplexF64, Dl*d, nk)
         for k=1:nk
-            o=(ps[k][il]-1)*Dl
-            U[(o+1):(o+Dl), k] .= rv[k] .* conj.(λ[k])
+            U[((ps[k][il]-1)*Dl+1):((ps[k][il]-1)*Dl+Dl), k] .= rv[k] .* conj.(λ[k])
         end
         G=U * reduce(hcat, (R[k][il] for k=1:nk))'
 
         if il == l
             #最后一个格点右键维数为 1，直接把投影后的目标态放进去
             Bd=reshape(Y - Δτ * G, Dl, d, Dr)
-            Vr=domain(ψ.AL[l])[1]
+            Vr=nb
             Bs[il]=TensorMap(Bd, Vl ⊗ phySpace ← Vr)
             break
         end
@@ -250,7 +259,7 @@ function residual_expand(mt, hb, em, Δτ, Δb, maxdim; tol=1e-14)
         end
         sort!(cands; by=x -> -x[1])
         λmax=max(cands[1][1], eps())
-        nkeep=min(Dr + Δb, maxdim, count(x -> x[1] > tol*λmax, cands))
+        nkeep=min(Dr + Δb, bond_dim, count(x -> x[1] > tol*λmax, cands))
         kept=cands[1:nkeep]
 
         #新的右键空间；稠密列按 sectors(Vr) 的顺序排列

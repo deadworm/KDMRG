@@ -41,7 +41,7 @@ for ig=1:gsteps
     (wm, em, gm, Dm, mt, hb)=mc_sample(m, config, mcsample, α)
     if mod(ig, bsteps)==1
         # 一步虚时演化 + 扩维：每个键增加 Δb，但不超过 bond_dim
-        global m = residual_expand(mt, hb, em, Δτ, Δb, bond_dim)
+        global m = residual_expand(m, hb, em, Δτ, Δb, bond_dim)
         @show [dim(space(m[i], 3)) for i in 1:(l-1)]
     else
         global m = normalize!(sr_update(mt, wm, em, gm, Dm, dm))

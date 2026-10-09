@@ -31,6 +31,37 @@ function ms_Hamiltonian()
     return enstring
 end
 
+function Vk(s, m1, m2, m0)
+    vk=0
+    for k=0:2s
+        if -k<=m0<=k
+            vk+=(U0*(2k+1)-U1*k*(k+1)*(2k+1))*wigner3j(s, k, s, -m1, -m0, m1+m0)*wigner3j(s, k, s, -m2, m0, m2-m0)*wigner3j(s, k, s, -s, 0, s)^2
+        end
+    end
+    return vk
+end
+
+function fsIsing_Hamiltonian()
+    enstring=zeros(Float64, 0, 5)
+    for im1=1:l
+        for im2=1:l
+            for m0=-l+1:l-1
+                m1=-s+im1-1
+                m2=-s+im2-1
+                if -s<=m1+m0<=s&&-s<=m2-m0<=s
+                    enstring=vcat(enstring, [(-1)^(2s+m0+m1+m2)*(2s+1)^2*Vk(s, m1, m2, m0) (im1-1)*2+1 -(m1+m0+s)*2-1 (im2-1)*2+2 -(m2-m0+s)*2-2])
+                    enstring=vcat(enstring, [(-1)^(2s+m0+m1+m2)*(2s+1)^2*Vk(s, m1, m2, m0) (im1-1)*2+2 -(m1+m0+s)*2-2 (im2-1)*2+1 -(m2-m0+s)*2-1])
+                end
+            end
+        end
+    end
+    for i=1:l
+        enstring=vcat(enstring, [-h (i-1)*2+1 -(i-1)*2-2 0 0])
+        enstring=vcat(enstring, [-h (i-1)*2+2 -(i-1)*2-1 0 0])
+    end
+    return enstring
+end
+
 #For the mc sampling
 function mc_sample(m, config0, mcsample, α)
     Dall = Dict{Vector{Int},ComplexF64}()
@@ -58,7 +89,7 @@ function mc_sample(m, config0, mcsample, α)
         #measure observables here
         if !haskey(Dm, config0)
             co0=mps_amp(As, config0)
-            (enm,Dc)=observable_config(enstring, As, co0, config0, Dall)
+            (enm, Dc)=observable_config(enstring, As, co0, config0, Dall)
             gradm=measure_grad(As, co0, config0)
             Dm[config0] = (wt/mcsample, wt^2/mcsample, co0, enm, gradm, Dc)
         else
@@ -73,13 +104,13 @@ function mc_sample(m, config0, mcsample, α)
     end
     em = 0
     for cf in keys(Dm)
-        em += Dm[cf][1]/wm * Dm[cf][4] 
+        em += Dm[cf][1]/wm * Dm[cf][4]
     end
     gm = Vector{Any}(undef, l)
     for il=1:l
         gm[il] = zeros(ComplexF64, slices_size(As[il]))
         for cf in keys(Dm)
-            gm[il] += Dm[cf][1]/wm * Dm[cf][5][il] 
+            gm[il] += Dm[cf][1]/wm * Dm[cf][5][il]
         end
     end
     #ĥ(b) = conj( Σ_σ (w_σ/wm) * H_bσ / ψ(σ) ) ≈ ⟨b|H|ψ⟩/⟨ψ|ψ⟩（H 为实对称矩阵）
@@ -179,4 +210,114 @@ function rdirect_sample(ALd, config0, α)
         R=AR[cnow]/sqrt(pc)
     end
     return config1, wt, updt, l
+end
+
+# ---------------------------------------------------------------------------
+# 电荷密度波结构因子 S(q) = (1/L)(⟨ρ_q†ρ_q⟩ - |⟨ρ_q⟩|²)，ρ_q = Σ_k c†_k c_{k+q}，L = 2l
+# q = 2π·qidx/L；CDW 位于 q = π，即 qidx = l
+# 动量模式编号与 ms_Hamiltonian 相同，算符串行格式 [系数, 算符…]：正数为产生算符，负数为湮灭算符
+# ---------------------------------------------------------------------------
+
+#ρ_q 与 ρ_q†ρ_q 的算符串，ρ_q†ρ_q = Σ_{k,k'} c†_{k+q} c_k c†_{k'} c_{k'+q}
+function cdw_ostrings(qidx)
+    L = 2*l
+    k2p = [x <= l ? 2x - 1 : 2 * (2l - x + 1) for x in 1:L]
+    shift(x) = mod(x + qidx - 1, L) + 1
+    rho = zeros(Float64, L, 3)
+    for ik = 1:L
+        rho[ik, :] = [1.0 k2p[ik] -k2p[shift(ik)]]
+    end
+    rr = zeros(Float64, L^2, 5)
+    for ik = 1:L, ik2 = 1:L
+        rr[(ik-1)*L+ik2, :] = [1.0 k2p[shift(ik)] -k2p[ik] k2p[ik2] -k2p[shift(ik2)]]
+    end
+    return rho, rr
+end
+
+#Dm 为 mc_sample 返回的采样字典（权重 Dm[cf][1] 未归一化），mt 为同一时刻的 MPS 张量
+function cdw_structure_factor(Dm, mt, qidx)
+    As = dense_slices(mt)
+    rho, rr = cdw_ostrings(qidx)
+    Dall = Dict{Vector{Int},ComplexF64}()
+    wsum = 0.0
+    rho_avg = 0.0im
+    rr_avg = 0.0im
+    for (cf, v) in Dm
+        w = v[1]
+        (ro, _) = observable_config(rho, As, v[3], cf, Dall)
+        (rro, _) = observable_config(rr, As, v[3], cf, Dall)
+        wsum += w
+        rho_avg += w * ro
+        rr_avg += w * rro
+    end
+    rho_avg /= wsum
+    rr_avg /= wsum
+    return real(rr_avg - abs2(rho_avg)) / (2*l)
+end
+
+# ---------------------------------------------------------------------------
+# 磁化（层赝自旋）结构因子 S(L) = (1/N_e) Σ_M ⟨V_LM† V_LM⟩，N_e = l（半满）
+# 费米子模式：轨道 o = m+s+1 的两个层 f=1,2 分别为模式 2o-1, 2o；σ_1=+1, σ_2=-1
+# V_LM = Σ_{m,f} (-1)^{s-m} (s L s; -m M m-M) σ_f c†_{m f} c_{m-M, f}（Wigner–Eckart，无额外归一化）
+# 对旋转对称态 S(L) 与 M 无关；无关联（无序）时 S(L) 与 L 无关，故 R = 1 - S(1)/S(0) 对无序态趋于 0
+# ---------------------------------------------------------------------------
+
+mag_mode(m, f) = 2*(Int(round(m+s))+1) - (f==1 ? 1 : 0)   #轨道 m、层 f 对应的模式编号（1-based）
+
+#V_LM 的单体项列表 [系数, 模式…]：返回 (m, f, w) 三元组，w = (-1)^{s-m}(s L s; -m M m-M) σ_f
+function mag_terms(L, M)
+    terms = Tuple{Float64,Int,Float64}[]   #(m, f, w) 的 w 不含 σ
+    for im = 1:l
+        m = im - 1 - s
+        m2 = m - M
+        (-s <= m2 <= s) || continue
+        w = Float64((-1)^Int(round(s-m)) * wigner3j(s, L, s, -m, M, m2))   #wigner3j 返回精确有理根，需转为浮点
+        for f = 1:2
+            push!(terms, (m, f, w))
+        end
+    end
+    return terms
+end
+
+#V_LM† V_LM 的算符串（4 个算符，按算符乘积顺序排列，与 observable_config 约定一致）
+function mag_ostrings(L, M)
+    terms = mag_terms(L, M)
+    sig(f) = f == 1 ? 1.0 : -1.0
+    ops = zeros(Float64, length(terms)^2, 5)
+    k = 0
+    for (ma, fa, wa) in terms, (mb, fb, wb) in terms
+        k += 1
+        #V† = Σ_a conj(w_a) σ_a c†_{m_a-M} c_{m_a};  V = Σ_b w_b σ_b c†_{m_b} c_{m_b-M}
+        ops[k, :] = [wa*wb*sig(fa)*sig(fb), mag_mode(ma-M, fa), -mag_mode(ma, fa), mag_mode(mb, fb), -mag_mode(mb-M, fb)]
+    end
+    return ops
+end
+
+#单体算符 V_LM 的算符串，用于检验（作用在 Fock 态上的系数）
+function mag_onebody_ostrings(L, M)
+    terms = mag_terms(L, M)
+    sig(f) = f == 1 ? 1.0 : -1.0
+    ops = zeros(Float64, length(terms), 3)
+    for (k, (m, f, w)) in enumerate(terms)
+        ops[k, :] = [w*sig(f), mag_mode(m, f), -mag_mode(m-M, f)]
+    end
+    return ops
+end
+
+#Dm 为 mc_sample 返回的采样字典，mt 为同一时刻的 MPS 张量
+function mag_structure_factor(Dm, mt, L)
+    As = dense_slices(mt)
+    wsum = sum(v[1] for v in values(Dm))
+    S = 0.0
+    for M = -L:L
+        ops = mag_ostrings(L, M)
+        Dall = Dict{Vector{Int},ComplexF64}()
+        vv_avg = 0.0im
+        for (cf, v) in Dm
+            (vo, _) = observable_config(ops, As, v[3], cf, Dall)
+            vv_avg += v[1] * vo
+        end
+        S += real(vv_avg / wsum)
+    end
+    return S / l
 end

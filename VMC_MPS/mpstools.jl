@@ -1,12 +1,13 @@
 #For initial direct-product mps
+#phySpace[il]、phylist[il] 为第 il 个格点的物理空间（不同格点可带不同的 Lz 荷）
 function prod_mps(config0)
     B = Vector{typeof(zb)}(undef, l + 1)
     B[1] = zb
     tensors = Vector{TensorMap}(undef, l)
     for i = 1:l
         pindex=s2p[(config0[2*i-1], config0[2*i])]
-        B[i+1] = fuse(B[i], phylist[pindex])
-        tenow = zeros(Float64, B[i] ⊗ phySpace ← B[i+1])
+        B[i+1] = fuse(B[i], phylist[i][pindex])
+        tenow = zeros(Float64, B[i] ⊗ phySpace[i] ← B[i+1])
         if pindex == 3
             tenow.data[2] = 1.0
         else
@@ -192,8 +193,6 @@ function residual_expand(m, hb, em, Δτ, Δb, bond_dim; tol=1e-14)
     ALd=[convert(Array, m.AL[il]) for il=1:l]
     ARd=[convert(Array, m.AR[il]) for il=1:l]
     ACd=[convert(Array, m.AC[il]) for il=1:l]
-    d=dim(phySpace)
-    psec=dense_sectors(phySpace)
     cm=1 + Δτ*real(em)
 
     cbs=collect(keys(hb))
@@ -215,6 +214,8 @@ function residual_expand(m, hb, em, Δτ, Δb, bond_dim; tol=1e-14)
     Vl=zb
     Bs=Vector{TensorMap}(undef, l)
     for il=1:l
+        d=dim(phySpace[il])
+        psec=dense_sectors(phySpace[il])
         Dl=size(E, 1)
         Dr=size(ACd[il], 3)
         Y=cm * reshape(E * reshape(ACd[il], size(ACd[il], 1), :), Dl*d, Dr)
@@ -230,7 +231,7 @@ function residual_expand(m, hb, em, Δτ, Δb, bond_dim; tol=1e-14)
             #最后一个格点右键维数为 1，直接把投影后的目标态放进去
             Bd=reshape(Y - Δτ * G, Dl, d, Dr)
             Vr=nb
-            Bs[il]=TensorMap(Bd, Vl ⊗ phySpace ← Vr)
+            Bs[il]=TensorMap(Bd, Vl ⊗ phySpace[il] ← Vr)
             break
         end
 
@@ -267,7 +268,7 @@ function residual_expand(m, hb, em, Δτ, Δb, bond_dim; tol=1e-14)
         for (_, c, _) in kept
             cnt[c]=get(cnt, c, 0)+1
         end
-        Vr=Vect[FermionParity⊠U1Irrep]((c => nc for (c, nc) in cnt)...)
+        Vr=Vect[sectortype(zb)]((c => nc for (c, nc) in cnt)...)
         Bm=zeros(ComplexF64, Dl*d, nkeep)
         j=0
         for c in sectors(Vr)
@@ -278,7 +279,7 @@ function residual_expand(m, hb, em, Δτ, Δb, bond_dim; tol=1e-14)
             end
         end
         Bd=reshape(Bm, Dl, d, nkeep)
-        Bs[il]=TensorMap(Bd, Vl ⊗ phySpace ← Vr)
+        Bs[il]=TensorMap(Bd, Vl ⊗ phySpace[il] ← Vr)
 
         #更新左环境：E ← Σ_s B_s† E AL_s，λ_k ← λ_k B_{s_k}
         Enew=zeros(ComplexF64, nkeep, size(ALd[il], 3))

@@ -10,14 +10,15 @@ using Plots
 
 include("mpstools.jl")
 include("mctools.jl")
-phySpace = Vect[FermionParity⊠U1Irrep]((0, 0)=>1, (1, 1)=>2, (0, 2)=>1)
 s2p = Dict((0, 0)=>1, (1, 0)=>2, (0, 1)=>3, (1, 1)=>4)
 p2s = [(0, 0), (1, 0), (0, 1), (1, 1)]
-phylist = [Vect[FermionParity⊠U1Irrep]((0, 0)=>1), Vect[FermionParity⊠U1Irrep]((1, 1)=>1), Vect[FermionParity⊠U1Irrep]((1, 1)=>1), Vect[FermionParity⊠U1Irrep]((0, 2)=>1)]
 
 t = 1
 V = 1
 l = 8
+#mpstools 按格点取物理空间：这里所有格点相同
+phySpace = fill(Vect[FermionParity⊠U1Irrep]((0, 0)=>1, (1, 1)=>2, (0, 2)=>1), l)
+phylist = fill([Vect[FermionParity⊠U1Irrep]((0, 0)=>1), Vect[FermionParity⊠U1Irrep]((1, 1)=>1), Vect[FermionParity⊠U1Irrep]((1, 1)=>1), Vect[FermionParity⊠U1Irrep]((0, 2)=>1)], l)
 n = 8
 bond_dim = 100
 dm = 0.01
